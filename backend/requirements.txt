@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+httpx
+psycopg2-binary
+python-dotenv
+asyncpg
+requests
+PyPDF2
+python-docx
+chromadb
+python-multipart

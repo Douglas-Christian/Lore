@@ -1,0 +1,5 @@
+# Ignore sourcebooks directory
+backend/sourcebooks/
+
+# Ignore environment files
+backend/.env
