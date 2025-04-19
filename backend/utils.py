@@ -71,7 +71,7 @@ async def get_sessions(db: AsyncSession, campaign_id: int):
     return result.scalars().all()
 
 # Update the query_ollama function to handle streaming responses
-def query_ollama(prompt: str, model: str = "llama3.2", api_key: str = None) -> dict:
+def query_ollama(prompt: str, model: str = "llama3.2", api_key: str = None, timeout: int = 60) -> dict:
     """
     Query the Ollama Llama API with a given prompt using the /chat endpoint.
 
@@ -79,6 +79,7 @@ def query_ollama(prompt: str, model: str = "llama3.2", api_key: str = None) -> d
         prompt (str): The input prompt for the LLM.
         model (str): The model to use (default is "llama3.2").
         api_key (str, optional): The API key for authentication. Defaults to None.
+        timeout (int, optional): Timeout in seconds for the request. Defaults to 60.
 
     Returns:
         dict: The combined response from the LLM API.
@@ -98,23 +99,32 @@ def query_ollama(prompt: str, model: str = "llama3.2", api_key: str = None) -> d
     print(f"Querying Ollama API at {url} with payload: {payload}")  # Debugging: Log the URL and payload
 
     try:
-        with httpx.Client() as client:
-            with client.stream("POST", url, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                combined_response = ""
-                for chunk in response.iter_text():
-                    print(f"Received chunk: {chunk}")  # Debugging: Log each chunk
-                    # Extract the "content" field from each JSON object
-                    try:
-                        chunk_json = json.loads(chunk)
-                        if "message" in chunk_json and "content" in chunk_json["message"]:
-                            combined_response += chunk_json["message"]["content"]
-                    except json.JSONDecodeError:
-                        continue
-                return {"response": combined_response}
+        with httpx.Client(timeout=timeout) as client:
+            try:
+                with client.stream("POST", url, json=payload, headers=headers) as response:
+                    response.raise_for_status()
+                    combined_response = ""
+                    for chunk in response.iter_text():
+                        print(f"Received chunk: {chunk}")  # Debugging: Log each chunk
+                        # Extract the "content" field from each JSON object
+                        try:
+                            chunk_json = json.loads(chunk)
+                            if "message" in chunk_json and "content" in chunk_json["message"]:
+                                combined_response += chunk_json["message"]["content"]
+                        except json.JSONDecodeError:
+                            continue
+                    
+                    # If we've received no content, provide a fallback response
+                    if not combined_response:
+                        return {"response": "I couldn't generate a response based on the given context. Please try asking another question."}
+                    
+                    return {"response": combined_response}
+            except httpx.TimeoutException:
+                print("Request to Ollama API timed out")
+                return {"error": "timed out", "fallback_response": "The request to the LLM timed out. This might be due to high server load or the complexity of the prompt. Consider using a simpler query or trying again later."}
     except httpx.RequestError as e:
         print(f"Error querying Ollama API: {e}")  # Debugging: Log the error
-        return {"error": str(e)}
+        return {"error": str(e), "fallback_response": "There was an error connecting to the LLM service. Please check that Ollama is running and try again."}
 
 def process_and_store_files(path: Union[str, Path]):
     """

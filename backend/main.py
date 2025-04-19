@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import PyPDF2
 import chromadb
 from chromadb.config import Settings
+import uuid
 
 # Initialize ChromaDB client
 chroma_client = chromadb.Client(Settings(persist_directory="chroma_data"))
@@ -60,7 +61,27 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 @app.post("/campaigns/{campaign_id}/narration_logs/")
 async def add_narration_log(campaign_id: int, content: str, db: AsyncSession = Depends(get_db)):
-    return await create_narration_log(db, campaign_id, content)
+    # Create the narration log in the database
+    narration_log = await create_narration_log(db, campaign_id, content)
+    
+    # Also add the narration log to ChromaDB for retrieval
+    try:
+        collection = chroma_client.get_or_create_collection(name="dnd_sourcebooks")
+        document_id = str(uuid.uuid4())
+        metadata = {
+            "type": "narration_log",
+            "campaign_id": str(campaign_id),
+            "narration_id": str(narration_log.id),
+            "created_at": str(narration_log.created_at)
+        }
+        collection.add(documents=[content], metadatas=[metadata], ids=[document_id])
+        print(f"Added narration log to ChromaDB with ID: {document_id}")
+    except Exception as e:
+        # Log the error but don't fail the request
+        print(f"Warning: Failed to add narration log to ChromaDB: {e}")
+        # The narration is still saved in the database, so we can continue
+    
+    return narration_log
 
 @app.get("/campaigns/{campaign_id}/narration_logs/")
 async def list_narration_logs(campaign_id: int, db: AsyncSession = Depends(get_db)):
@@ -75,18 +96,37 @@ async def list_sessions(campaign_id: int, db: AsyncSession = Depends(get_db)):
     return await get_sessions(db, campaign_id)
 
 @app.post("/llm/query/")
-async def query_llm(query: LLMQuery):
+async def query_llm(query: LLMQuery, campaign_id: int = None, db: AsyncSession = Depends(get_db)):
     """
-    Endpoint to query the Ollama Llama API.
+    Endpoint to query the Ollama Llama API with context from previous narrations.
 
     Args:
         query (LLMQuery): The input query containing the prompt for the LLM.
+        campaign_id (int, optional): The ID of the campaign to retrieve context from. Defaults to None.
 
     Returns:
         dict: The response from the LLM API.
     """
     # Debugging: Log the parsed query
     print(f"Parsed query: {query}")
+    
+    # Build context from previous narrations if campaign_id is provided
+    context = ""
+    if campaign_id is not None:
+        # Get the most recent narration logs (limited to 5 to prevent context overflow)
+        narration_logs = await get_narration_logs(db, campaign_id)
+        narration_logs = sorted(narration_logs, key=lambda x: x.created_at, reverse=True)[:5]
+        
+        if narration_logs:
+            context = "Previous narrations:\n"
+            # Add the narrations in chronological order (oldest first)
+            for log in reversed(narration_logs):
+                context += f"- {log.content}\n"
+            context += "\nBased on the above context, "
+    
+    # Prepare the enhanced prompt with context
+    enhanced_prompt = f"{context}{query.prompt}"
+    print(f"Enhanced prompt with context: {enhanced_prompt}")
 
     # Load the API key from the Ollama config.json file
     import json
@@ -96,15 +136,24 @@ async def query_llm(query: LLMQuery):
     api_key = config.get("id")  # Use the `id` field as the API key
 
     # Prepare the query payload
-    query_payload = {"model": "llama3.2", "prompt": query.prompt}
+    query_payload = {"model": "llama3.2", "prompt": enhanced_prompt}
     print(f"Query payload: {query_payload}")  # Debugging: Log the query payload
 
     # Send the query to the Ollama API
-    response = query_ollama(query.prompt, api_key=api_key)
+    response = query_ollama(enhanced_prompt, api_key=api_key)
 
     # Debugging: Log the full response
     print(f"Full response from Ollama API: {response}")
 
+    # If campaign_id was provided, also retrieve similar content from ChromaDB
+    if campaign_id is not None and 'response' in response:
+        # Get relevant content from ChromaDB
+        retrieve_results = retrieve_from_chromadb(query.prompt)
+        
+        # Add a note about additional context used (if any)
+        if 'documents' in retrieve_results and retrieve_results['documents'][0]:
+            response['context_note'] = "Response was enhanced with additional context from previous narrations and source materials."
+    
     return response
 
 @app.post("/upload/")
