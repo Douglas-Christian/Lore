@@ -9,7 +9,8 @@ logging.getLogger("urllib3").setLevel(logging.DEBUG)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import NoResultFound
-from backend.models import Campaign, NarrationLog, Session
+# Fix the import to use the local models module instead of backend.models
+from models import Campaign, NarrationLog, Session
 import httpx
 import json
 from typing import Union
